@@ -137,6 +137,18 @@ db.adminCommand({listDatabases: 1}).databases.forEach(function(database) {
                               : " (view or no stats)"));
                     return;
                 }
+                // Atlas 8.0 quirk: stats() on a logical time-series
+                // namespace now returns the same count/size/storageSize
+                // as its underlying system.buckets.<coll>. Including
+                // both would double-count storage and indexes. The
+                // bucket collection is the source of truth on disk and
+                // is processed separately in this loop, so skip the
+                // logical entry here.
+                if (stats.timeseries && !isBucketColl) {
+                    print("  · Skipping " + collName +
+                          " (time-series logical namespace; storage counted via system.buckets." + collName + " to avoid double-counting on Atlas 8.0)");
+                    return;
+                }
                 var indexes = currentDb[collName].getIndexes();
 
                 // Per-index usage from $indexStats (per-node, since last mongod start)
