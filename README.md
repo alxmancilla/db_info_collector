@@ -4,6 +4,40 @@
 
 This guide will help you collect the necessary data from your MongoDB deployment to perform an accurate cluster sizing exercise. The sizing analysis will determine the optimal Atlas cluster tier for your workload.
 
+## Quick Start (≈ 5 minutes)
+
+If this is your first time, follow these three steps. Skip ahead to [Prerequisites](#prerequisites) only if you need platform-specific install instructions or want to limit privileges.
+
+**1. Install `mongosh`** (skip if `mongosh --version` already works):
+
+```bash
+# macOS
+brew install mongosh
+# Windows
+winget install MongoDB.Shell
+# Linux / other: see "Installing mongosh" below
+```
+
+**2. Get your connection string:**
+
+- **MongoDB Atlas:** Atlas UI → **Database** → click **Connect** on your cluster → **Drivers** → copy the `mongodb+srv://...` URI. Replace `<db_password>` in the URI with your actual password. If you don't have a database user yet, click **Add new database user** in the same dialog and grant `Atlas admin` (or follow [`scripts/create_sizing_user.js`](scripts/create_sizing_user.js) for a minimum-privilege user).
+- **Self-hosted:** `mongodb://<host>:27017` for a single node, or `mongodb://host1,host2,host3/?replicaSet=<name>` for a replica set.
+- **Atlas IP access list:** make sure the machine you're running from is allowed (Atlas UI → **Network Access**).
+
+**3. Run the script during normal or even peak hours** (from the repository root):
+
+```bash
+mongosh "<your-connection-string>" --file scripts/collect_sizing_data.js > sizing_data_output.txt
+```
+
+What to expect:
+
+- The script runs for about **60–75 seconds** (60 s is the operations sample window).
+- The terminal prints a live summary while the JSON report is written to `sizing_data_output.txt`.
+- A successful run ends with `Skipped Collections: N` followed by `FULL REPORT (save this output):` and the JSON dump.
+
+When it finishes, send `sizing_data_output.txt` to your MongoDB contact. That's it — everything below is optional detail.
+
 ## Prerequisites
 
 - MongoDB 4.4+ deployment (including MongoDB 7.x and MongoDB 8.0)
@@ -127,26 +161,66 @@ The sizing exercise requires the following information:
 
 The fastest path to a complete sizing dataset is [`scripts/collect_sizing_data.js`](scripts/collect_sizing_data.js). It performs the database/collection statistics pass, a 60-second `opcounters` sample, and (optionally) a cluster-wide `$indexStats` union in a single run, emitting one JSON report.
 
-### Step 1: Connect to Your MongoDB Cluster
+### Step 1: Get Your Connection String
+
+You don't need to open an interactive shell — just have a connection string ready to pass to `--file` in Step 2.
+
+**MongoDB Atlas:**
+
+1. Atlas UI → **Database** → click **Connect** on your cluster.
+2. Choose **Drivers** (not "MongoDB Shell").
+3. Copy the URI — it looks like `mongodb+srv://<user>:<db_password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`.
+4. Replace `<db_password>` with the real password (URL-encode special characters if any).
+5. Make sure your machine's IP is in **Network Access** (Atlas UI).
+
+**Self-hosted MongoDB:**
 
 ```bash
-# For self-hosted MongoDB
-mongosh "mongodb://localhost:27017" --username <your-username>
+# Single node
+mongodb://<username>:<password>@<host>:27017/?authSource=admin
 
-# For MongoDB Atlas
-mongosh "mongodb+srv://<cluster-url>" --username <your-username>
-
-# For MongoDB 8.0 with new authentication methods
-mongosh "mongodb+srv://<cluster-url>" --username <your-username> --authenticationDatabase admin
+# Replica set
+mongodb://<username>:<password>@host1:27017,host2:27017,host3:27017/?replicaSet=<setName>&authSource=admin
 ```
+
+If you'd rather supply the password interactively, omit `:<password>` from the URI and pass `--username <user>` to `mongosh`; you'll be prompted.
 
 ### Step 2: Run the Automated Script
 
+From the repository root, replace `<your-connection-string>` with the URI from Step 1:
+
 ```bash
-mongosh "your-connection-string" --file scripts/collect_sizing_data.js > sizing_data_output.txt
+mongosh "<your-connection-string>" --file scripts/collect_sizing_data.js > sizing_data_output.txt
 ```
 
-Run this during peak hours so the 60-second `opcounters` sample reflects realistic load. Run it multiple times across different peak periods if your workload is bursty, and record the highest values observed.
+Run this **during peak hours** so the 60-second `opcounters` sample reflects realistic load. For bursty workloads, run it across several peak periods and keep the highest values observed.
+
+**Verify it worked.** A successful run takes ~60–75 seconds and the terminal prints something like:
+
+```
+============================================================
+MongoDB Atlas Sizing - Data Collection Script
+MongoDB Version: <X.Y.Z>
+============================================================
+✓ Cluster info collected …
+✓ Data metrics collected …
+Measuring operations (60 second sample)…
+✓ Operations metrics collected …
+✓ Replication info collected …
+============================================================
+COLLECTION COMPLETE - SUMMARY
+============================================================
+…summary tables…
+Skipped Collections: <N> (see report.dataMetrics.skippedCollections[] for reasons)
+============================================================
+FULL REPORT (save this output):
+============================================================
+{ collectionTimestamp: …, mongoVersion: …, clusterInfo: { … }, … }
+```
+
+`sizing_data_output.txt` should be several thousand lines on a non-trivial cluster. Send that file (and the questionnaire output from Step 4) to your MongoDB contact.
+
+If you see `MongoServerError: command … requires authentication` or `not authorized on … to execute command`, your user is missing privileges — see [Troubleshooting → Permission Errors](#permission-errors). If `mongosh` itself fails to connect, double-check the password substitution and the Atlas Network Access list.
 
 The output includes:
 
@@ -200,11 +274,17 @@ The user must have read access on every database on every node — see [`scripts
 
 ### Step 4: Complete the Workload Questionnaire
 
-The automated script cannot infer business requirements. Open [`scripts/03_workload_questionnaire.js`](scripts/03_workload_questionnaire.js), fill in the `answers` block with your actual values, then run it to print a structured record:
+The automated script cannot infer business requirements (latency targets, HA needs, data growth projections). Before running the questionnaire script, **open it in an editor and fill in the `answers` block at the top with your actual values** — the defaults are placeholders.
 
 ```bash
-mongosh "your-connection-string" --file scripts/03_workload_questionnaire.js > questionnaire_output.txt
+# 1. Edit the answers (latency, regions, growth, etc.)
+$EDITOR scripts/03_workload_questionnaire.js
+
+# 2. Run to emit a structured record
+mongosh "<your-connection-string>" --file scripts/03_workload_questionnaire.js > questionnaire_output.txt
 ```
+
+Send `questionnaire_output.txt` alongside `sizing_data_output.txt`.
 
 ## Alternative: Granular Step-by-Step Scripts
 
@@ -213,7 +293,7 @@ If you prefer to run each collection step independently — for example, to limi
 ### Database and Collection Statistics
 
 ```bash
-mongosh "your-connection-string" --file scripts/01_database_collection_stats.js > step2_output.txt
+mongosh "<your-connection-string>" --file scripts/01_database_collection_stats.js > step2_output.txt
 ```
 
 ### Operations Per Second (Peak Load)
@@ -221,7 +301,7 @@ mongosh "your-connection-string" --file scripts/01_database_collection_stats.js 
 Run [`scripts/02_ops_per_second.js`](scripts/02_ops_per_second.js) during peak hours; it samples `opcounters` over 60 seconds.
 
 ```bash
-mongosh "your-connection-string" --file scripts/02_ops_per_second.js > step3_output.txt
+mongosh "<your-connection-string>" --file scripts/02_ops_per_second.js > step3_output.txt
 ```
 
 - Run multiple times during different peak periods.
@@ -235,7 +315,7 @@ Equivalent to enabling `COLLECT_CLUSTER_WIDE_INDEX_USAGE` in the automated scrip
 **Replica set** — [`scripts/04_index_usage_all_nodes.js`](scripts/04_index_usage_all_nodes.js):
 
 ```bash
-mongosh "your-connection-string" --file scripts/04_index_usage_all_nodes.js > step5_output.txt
+mongosh "<your-connection-string>" --file scripts/04_index_usage_all_nodes.js > step5_output.txt
 ```
 
 **Sharded cluster** — [`scripts/05_index_usage_sharded.js`](scripts/05_index_usage_sharded.js) connected to a `mongos`:
@@ -261,7 +341,7 @@ While the sizing scripts remain compatible, MongoDB 8.0 introduces several featu
 To verify you're running MongoDB 8.0 and check for version-specific features, run [`scripts/verify_mongodb_version.js`](scripts/verify_mongodb_version.js):
 
 ```bash
-mongosh "your-connection-string" --file scripts/verify_mongodb_version.js
+mongosh "<your-connection-string>" --file scripts/verify_mongodb_version.js
 ```
 
 ## Data Collection Checklist
